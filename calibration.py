@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from fractions import Fraction as F
 from types import MappingProxyType
 
+from bounded import qp_optimal_point
+
 
 @dataclass(frozen=True)
 class Fit:
@@ -17,6 +19,23 @@ class State:
     revision: int
     membership: object
     fits: tuple
+
+
+@dataclass(frozen=True)
+class Optimum:
+    """Exact polyhedral description of the bounded joint optimal set S.
+
+    S = {x : inequalities, equalities} where the equalities are the
+    normal-equation image H·x = H·x* plus the scalar optimality cut
+    (H·x* - g)·x = (H·x* - g)·x* for one arbitrary minimizer x* (`point`);
+    the description is independent of which minimizer was found, so it
+    covers every global optimum without anchoring any coordinate.
+    """
+    revision: int
+    nodes: tuple
+    equalities: tuple
+    inequalities: tuple
+    point: tuple
 
 
 def _inverse(matrix):
@@ -61,6 +80,56 @@ class Calibrator:
     def __init__(self, ledger):
         self.ledger = ledger
         self._state = None
+        self._optimum = None
+
+    def optimum(self):
+        """Optimal-set description of the current revision (recomputed fully)."""
+        if self._optimum is not None and self._optimum.revision == self.ledger.revision:
+            return self._optimum
+        snapshot = self.ledger.snapshot()
+        nodes = snapshot.nodes
+        index = {node: i for i, node in enumerate(nodes)}
+        size = len(nodes)
+        information = [[F(0) for _ in range(size)] for _ in range(size)]
+        rhs = [F(0) for _ in range(size)]
+        for _, obs in snapshot.rows:
+            u, v = index[obs.u], index[obs.v]
+            information[u][u] += obs.w
+            information[v][v] += obs.w
+            information[u][v] -= obs.w
+            information[v][u] -= obs.w
+            rhs[u] -= obs.w * obs.d
+            rhs[v] += obs.w * obs.d
+        ineq_rows = []
+        ineq_vals = []
+        for _, bound in sorted(self.ledger.bounds.items()):
+            u, v = index[bound.u], index[bound.v]
+            if bound.upper is not None:
+                row = [F(0)] * size
+                row[u] = F(-1)
+                row[v] = F(1)
+                ineq_rows.append(row)
+                ineq_vals.append(bound.upper)
+            if bound.lower is not None:
+                row = [F(0)] * size
+                row[u] = F(1)
+                row[v] = F(-1)
+                ineq_rows.append(row)
+                ineq_vals.append(-bound.lower)
+        point = qp_optimal_point(information, rhs, ineq_rows, ineq_vals)
+        image = [sum((h * x for h, x in zip(row, point)), F(0))
+                 for row in information]
+        gradient = [image[i] - rhs[i] for i in range(size)]
+        cut = sum((g * x for g, x in zip(gradient, point)), F(0))
+        equalities = tuple((tuple(row), image[i])
+                           for i, row in enumerate(information))
+        equalities += ((tuple(gradient), cut),)
+        inequalities = tuple((tuple(row), value)
+                             for row, value in zip(ineq_rows, ineq_vals))
+        optimum = Optimum(snapshot.revision, nodes, equalities, inequalities,
+                          tuple(point))
+        self._optimum = optimum
+        return optimum
 
     def current(self):
         if self._state is not None and self._state.revision == self.ledger.revision:

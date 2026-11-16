@@ -5,12 +5,11 @@
   "verify": [
     "python3",
     "-B",
-    "checks.py"
+    "verify_all.py"
   ],
   "demo": [
     "python3",
     "-B",
-    "demo.py",
-    "samples/network.json"
+    "demo_all.py"
   ]
 }
